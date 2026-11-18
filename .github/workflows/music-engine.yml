@@ -1,0 +1,80 @@
+name: Build music engine
+
+# KimiLM makes music on the user's computer with ACE-Step 1.5 through acestep.cpp (MIT). Its authors publish no
+# ready-made programs, so this workflow builds them from the commit pinned in pins.json and publishes them as a
+# release of THIS repository, which is public so that every installed KimiLM can download them (Sound → Voices &
+# models → Music on this computer → Install). KimiLM's own repository names this one in engine/dva/versions.json
+# (music_engine_repo) and the release in music_engine_tag: keep pins.json equal to those values.
+# Run it once, and again whenever the pinned commit changes: Actions → Build music engine → Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      vulkan:
+        description: 'Also build for graphics cards (Vulkan: Intel, AMD, NVIDIA)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read the pinned source
+        id: pin
+        shell: bash
+        run: |
+          python -c "import json; v = json.load(open('pins.json')); print('repo=' + v['acestep_repo']); print('commit=' + v['acestep_commit']); print('tag=' + v['music_engine_tag'])" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch acestep.cpp at the pinned commit
+        shell: bash
+        run: |
+          git clone "https://github.com/${{ steps.pin.outputs.repo }}.git" ace
+          git -C ace checkout "${{ steps.pin.outputs.commit }}"
+          git -C ace submodule update --init --recursive
+
+      - name: Install Vulkan SDK
+        if: ${{ inputs.vulkan }}
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $vulkan = if ('${{ inputs.vulkan }}' -eq 'true') { 'ON' } else { 'OFF' }
+          cmake -S ace -B ace/build-msvc -DGGML_CPU_ALL_VARIANTS=ON -DGGML_BACKEND_DL=ON "-DGGML_VULKAN=$vulkan"
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
+          cmake --build ace/build-msvc --config Release -j $env:NUMBER_OF_PROCESSORS
+          if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item "ace\build-msvc\Release\*.exe" dist\
+          Copy-Item "ace\build-msvc\Release\*.dll" dist\ -ErrorAction SilentlyContinue
+          Copy-Item "ace\LICENSE" "dist\LICENSE-acestep.cpp.txt"
+          if (-not (Test-Path dist\ace-lm.exe) -or -not (Test-Path dist\ace-synth.exe)) { throw "ace-lm.exe or ace-synth.exe was not built" }
+          Get-ChildItem dist | Select-Object Name, Length
+          Compress-Archive -Path dist\* -DestinationPath acestep-windows-x64.zip
+
+      - name: Publish as a release of this repository
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pin.outputs.tag }}
+          COMMIT: ${{ steps.pin.outputs.commit }}
+          SOURCE: ${{ steps.pin.outputs.repo }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --latest=false \
+            --title "Music engine ($TAG)" \
+            --notes "acestep.cpp built from https://github.com/$SOURCE at commit $COMMIT (MIT licence). Downloaded by KimiLM for music on this computer; not an app release."
+          gh release upload "$TAG" acestep-windows-x64.zip --clobber
