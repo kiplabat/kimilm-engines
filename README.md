@@ -8,11 +8,12 @@ fetch them.
 
 KimiLM makes music on the user's computer with ACE-Step 1.5 through
 [acestep.cpp](https://github.com/ace-step/acestep.cpp) (MIT licence). Its authors publish no ready-made programs,
-so the workflow **Build music engine** builds `ace-lm` and `ace-synth` for Windows from the commit in `pins.json`
-and publishes them as a release of this repository (`acestep-windows-x64.zip`).
+so the workflow **Build music engine** builds `ace-lm` and `ace-synth` from the commit in `pins.json` and
+publishes them as a release of this repository: `acestep-windows-x64.zip` for Windows and
+`acestep-linux-x64.tar.gz` for Linux (KimiOS included). KimiLM downloads the one for the system it runs on.
 
 - `pins.json` holds the upstream repository, the commit and the release tag. Keep it equal to `acestep_repo`,
-  `acestep_commit` and `music_engine_tag` in KimiLM's `engine/dva/versions.json`.
+  `acestep_commit` and `music_engine_tag` in KimiLM's `engine/kimilm/versions.json`.
 - Run it once per pin: **Actions → Build music engine → Run workflow** (tick the box to also build for graphics
   cards).
 - KimiLM then installs it from Sound → Voices & models → Music on this computer → Install.

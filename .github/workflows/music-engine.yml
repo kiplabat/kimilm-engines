@@ -3,9 +3,11 @@ name: Build music engine
 # KimiLM makes music on the user's computer with ACE-Step 1.5 through acestep.cpp (MIT). Its authors publish no
 # ready-made programs, so this workflow builds them from the commit pinned in pins.json and publishes them as a
 # release of THIS repository, which is public so that every installed KimiLM can download them (Sound → Voices &
-# models → Music on this computer → Install). KimiLM's own repository names this one in engine/dva/versions.json
+# models → Music on this computer → Install). KimiLM's own repository names this one in engine/kimilm/versions.json
 # (music_engine_repo) and the release in music_engine_tag: keep pins.json equal to those values.
 # Run it once, and again whenever the pinned commit changes: Actions → Build music engine → Run workflow.
+# It builds for Windows x64 (acestep-windows-x64.zip) and Linux x64 (acestep-linux-x64.tar.gz, used by KimiOS and
+# other Linux installs): KimiLM downloads the one for the system it runs on.
 
 on:
   workflow_dispatch:
@@ -19,8 +21,34 @@ permissions:
   contents: write
 
 jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pin.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read the pinned source
+        id: pin
+        run: |
+          python3 -c "import json; v = json.load(open('pins.json')); print('repo=' + v['acestep_repo']); print('commit=' + v['acestep_commit']); print('tag=' + v['music_engine_tag'])" >> "$GITHUB_OUTPUT"
+
+      - name: Create the release once (both builds upload to it)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pin.outputs.tag }}
+          COMMIT: ${{ steps.pin.outputs.commit }}
+          SOURCE: ${{ steps.pin.outputs.repo }}
+        run: |
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --latest=false \
+            --title "Music engine ($TAG)" \
+            --notes "acestep.cpp built from https://github.com/$SOURCE at commit $COMMIT (MIT licence). Downloaded by KimiLM for music on this computer; not an app release."
+
   windows:
     name: Windows x64
+    needs: release
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -66,15 +94,69 @@ jobs:
           Get-ChildItem dist | Select-Object Name, Length
           Compress-Archive -Path dist\* -DestinationPath acestep-windows-x64.zip
 
-      - name: Publish as a release of this repository
+      - name: Upload to the release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.pin.outputs.tag }}
-          COMMIT: ${{ steps.pin.outputs.commit }}
-          SOURCE: ${{ steps.pin.outputs.repo }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: gh release upload "$TAG" acestep-windows-x64.zip --clobber -R "$GITHUB_REPOSITORY"
+
+  linux:
+    name: Linux x64
+    needs: release
+    # 22.04 (glibc 2.35) so the programs also run on older distributions; KimiOS (Fedora) is newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read the pinned source
+        id: pin
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --latest=false \
-            --title "Music engine ($TAG)" \
-            --notes "acestep.cpp built from https://github.com/$SOURCE at commit $COMMIT (MIT licence). Downloaded by KimiLM for music on this computer; not an app release."
-          gh release upload "$TAG" acestep-windows-x64.zip --clobber
+          python3 -c "import json; v = json.load(open('pins.json')); print('repo=' + v['acestep_repo']); print('commit=' + v['acestep_commit'])" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch acestep.cpp at the pinned commit
+        run: |
+          git clone "https://github.com/${{ steps.pin.outputs.repo }}.git" ace
+          git -C ace checkout "${{ steps.pin.outputs.commit }}"
+          git -C ace submodule update --init --recursive
+
+      - name: Install Vulkan SDK
+        if: ${{ inputs.vulkan }}
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+
+      - name: Build
+        run: |
+          VULKAN=$([ "${{ inputs.vulkan }}" = "true" ] && echo ON || echo OFF)
+          # Backends are separate libraries loaded at run time from the programs' own folder ($ORIGIN),
+          # with one CPU library per processor generation, as on Windows.
+          cmake -S ace -B ace/build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_CPU_ALL_VARIANTS=ON \
+            -DGGML_BACKEND_DL=ON -DGGML_VULKAN=$VULKAN -DCMAKE_BUILD_RPATH='$ORIGIN' -DCMAKE_INSTALL_RPATH='$ORIGIN'
+          cmake --build ace/build --config Release -j "$(nproc)"
+
+      - name: Package
+        run: |
+          B=ace/build
+          mkdir dist
+          cp "$B/ace-lm" "$B/ace-synth" dist/
+          for t in ace-server ace-understand quantize neural-codec mp3-codec; do [ -f "$B/$t" ] && cp "$B/$t" dist/ || true; done
+          # the shared libraries under the names the programs ask for (no symlinks in the archive)
+          cp -L "$B/libggml.so.0" "$B/libggml-base.so.0" dist/
+          cp "$B"/libggml-cpu-*.so dist/
+          [ -f "$B/libggml-vulkan.so" ] && cp "$B/libggml-vulkan.so" dist/ || true
+          cp ace/LICENSE dist/LICENSE-acestep.cpp.txt
+          strip --strip-unneeded dist/ace-* dist/*.so* || true
+          test -x dist/ace-lm && test -x dist/ace-synth
+          # must start from any folder: the libraries are found next to the programs
+          mkdir /tmp/check && cp dist/* /tmp/check/ && /tmp/check/ace-lm --help | head -1
+          ls -la dist
+          tar -C dist -czf acestep-linux-x64.tar.gz .
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: gh release upload "$TAG" acestep-linux-x64.tar.gz --clobber -R "$GITHUB_REPOSITORY"
